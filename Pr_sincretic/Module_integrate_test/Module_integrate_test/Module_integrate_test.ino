@@ -5,6 +5,7 @@
 
 #define MSG_MAX_LEN 30
 #define FLOOD_COUNT_DETECTION_CYCLES 10
+#define BEC_pin 6
 
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
@@ -15,6 +16,13 @@ int volatile time_count = 0;
 const int rs = 12, en = 11, d4 = 4, d5 = 3, d6 = 8, d7 = 5;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);//Adresa, coloane, linii
 
+volatile float temperatura, prev_error, suma_error, temperatura_setata = 26;
+volatile float kp = 20, ki = 15, kd = 10;
+
+int temp_val[2];
+bool temp_parsing = false;
+int temp_pos = 0;
+
 int pwm_val[3][2];
 bool pwm_parsing = false;
 int pwm_pos = 0;
@@ -24,10 +32,9 @@ char buf[] = "!INUNDATIE!";
 bool msg_parsing = false;
 int msg_pos = 0;
 volatile bool msg_rec_completed = false;
-volatile bool refresh_needed = false;
 
-static char row_up[15] = "PS 2";
-static char row_down[17] = "Semestrul II";
+static char row_up[15] = "";
+static char row_down[17] = "";
 
 volatile bool flood_detected = false;
 volatile int flood_count = 0;
@@ -41,8 +48,6 @@ typedef struct mesaje_nvm {
 } mesaje_nvm_t;
 
 mesaje_nvm_t mesaje_ram[10];
-
-int j = 0;
 
 int ora0=0,ora1=14,min0=5,min1=9,sec0=5,sec1=0;
 
@@ -140,8 +145,6 @@ enum Menus_b {
   MENU_MAX_NUM_b
 };
 
-int change = 0;
-
 Menus_b scroll_menu_b = MENU_BLOCAT;
 Menus_b current_menu_b =  MENU_BLOCAT;
 
@@ -183,11 +186,9 @@ typedef void (state_machine_handler_t_nec)(void);
 typedef void (state_machine_handler_t_cit)(void);
 typedef void (state_machine_handler_t_in)(void);
 
-
-
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------SETUP AND LOOP----------------------------------------//
+//----------------------------SETUP AND LOOP---------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -199,11 +200,10 @@ void setup() {
   TCCR2B |= (1 << CS22) | (1 << CS20) | (1 << CS21);
   TIMSK2 = (1 << OCIE2A);
 
+  lcd.begin(16,2);
   USART_Init(MYUBRR);
   PWM_Init();
   adc_init();
-  Disp_Init();
-  EINT_Init();
   //Clear_EEPROM_Mesaje();
   Read_EEPROM_Mesaje();
   initializare_char();
@@ -214,6 +214,7 @@ void setup() {
 void loop() {
 
     lcd.clear();
+    temperatura = read_temp();
     volatile Buttons event = GetButtons();
     if((blocat == true) && (event != EV_NONE))
     {
@@ -286,12 +287,12 @@ void loop() {
     memset(msg_val, 0, sizeof(msg_val));
 
   }
-  
+  PID();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------INITIALIZARE FUNCTII/REGISTRII----------------------------------------//
+//----------------------------INITIALIZARE FUNCTII/REGISTRII-----------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -342,39 +343,13 @@ void adc_init()
   ADCSRA |= (1 << ADSC);
 }
 
-void Disp_Init(void)
-{
-  // set up the LCD's number of columns and rows:
-  lcd.begin(16, 2);
-  // Print a message to the LCD.
-  lcd.print("Sincretic 2021");
-}
-
-
-void EINT_Init(void)
-{
-  PORTD |= (1 << PORTD2); // Rezistor de tip pull-up activat
-  EICRA = 0;
-  EIMSK |= 1 << INT0;
-}
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------RUTINA INTRERUPERI----------------------------------------//
+//----------------------------RUTINA INTRERUPERI-----------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
-//Intrerupere Externa pentru detectia inundatiei
-ISR(INT0_vect)
-{
-  flood_count++;
-  if (flood_count > FLOOD_COUNT_DETECTION_CYCLES)
-  {
-    flood_detected = true;
-    flood_count = 0;
-    // Avem cotinuintate intre PD2 si GND, posibil eveniment inundatie
-  }
-}
 
 //Intrerupere pentru citirea de pe serial
 ISR(USART_RX_vect)
@@ -413,6 +388,16 @@ ISR(USART_RX_vect)
     msg_parsing = false;
     msg_rec_completed = true;
   }
+  else if (c == '*')
+  {
+    temp_parsing = true;
+    temp_pos = 0;
+  }
+  else if (c == ')')
+  {
+    temp_parsing = false;
+    temperatura_setata = temp_val[0] * 10 + temp_val[1]; 
+  }
   else
   {
     if (pwm_parsing == true)
@@ -427,6 +412,11 @@ ISR(USART_RX_vect)
       {
         msg_val[msg_pos++] = c;
       }
+    }
+    if (temp_parsing == true)
+    {
+      temp_val[temp_pos % 2] = c - '0';
+      temp_pos++;
     }
   }
 
@@ -446,11 +436,9 @@ ISR(TIMER2_COMPA_vect)
   }
 }
 
-
-
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------EEPROM----------------------------------------//
+//----------------------------EEPROM-----------------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -470,18 +458,15 @@ void Write_EEPROM_Mesaje()
 void Clear_EEPROM_Mesaje()
 {
   lcd.clear();
-  lcd.setCursor(0,0);
   lcd.print("STERGERE...");
   for (int i = 0 ; i < EEPROM.length() ; i++) {
     EEPROM.write(i, 0);
   }
 }
 
-
-
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------SALVARE MESAJE NOI----------------------------------------//
+//----------------------------SALVARE MESAJE NOI-----------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -508,7 +493,6 @@ int Salveaza_Mesaj(char* msg, int len)
   Write_EEPROM_Mesaje();
   return 0;
 }
-
 
 //nr mesaje necitite
 int Mesaje_necitite(void)
@@ -550,10 +534,9 @@ int Inundatii_citite(void)
   return nr;
 }
 
-
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------SALVARE INUNDATII----------------------------------------//
+//----------------------------SALVARE INUNDATII------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -580,14 +563,11 @@ int Salveaza_inundatie(char* msg2, int len)
   return 0;
 }
 
-
-
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------ALTE FUNCTII PT SERIAL/ADC----------------------------------------//
+//----------------------------ALTE FUNCTII PT SERIAL/ADC---------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-
 
 unsigned char USART_Receive(void)
 {
@@ -637,22 +617,21 @@ double read_water() //read and return temperature
 //Transmitere pe serial apa
 void Transmitere_water() //read and return temperature
 { 
-  int water = read_water();
-  if (water < 100)
+  int water = read_water(); //citeste o valoare analogica
+  if (water < 100) //nivel mic
   {
     flood_detected = false;
   }
-  else if (water > 100 && water < 450)
+  else if (water > 100 && water < 450) //nivel mediu
   {
     flood_detected = false;
   }
-  else if (water > 450) {
+  else if (water > 450) { //nivel mare
     flood_count++;
     if (flood_count > FLOOD_COUNT_DETECTION_CYCLES)
     {
       flood_detected = true;
       flood_count = 0;
-      // Avem cotinuintate intre PD2 si GND, posibil eveniment inundatie
     }
   }
 }
@@ -666,6 +645,7 @@ void Transmitere_Temperatura() //read and return temperature
   voltage = reading * 5.0; voltage /= 1024.0;
   temperatureCelsius = (voltage - 0.5) * 100;
 
+  //procesare temperatura cu zecimale folosind int pentru sprintf ca nu mere aparent sa scrii pe serial alte valori decat %d
   int parte_intreaga, parte_zecimala;
   int int_temperatureCelsius = temperatureCelsius * 100;
 
@@ -685,14 +665,14 @@ void Transmitere_Temperatura() //read and return temperature
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE NECITITE----------------------------------------//
+//----------------------------AFISARE NECITITE-------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
 void print_menu_nec(enum Necitit_Sub_Menus menu)
 {
   lcd.clear();
-  Read_EEPROM_Mesaje ();
+  Read_EEPROM_Mesaje (); //citeste din eeprom inainte sa afiseze
   switch (menu)
   {
     case NECITIT_SUB_MENU_1:
@@ -709,7 +689,7 @@ void print_menu_nec(enum Necitit_Sub_Menus menu)
           lcd.setCursor(0, 1);
           lcd.print(row_down);
           mesaje_ram[0].stare_citire = true;
-          Write_EEPROM_Mesaje();
+          Write_EEPROM_Mesaje(); 
           delay(1000);
          }
          else  lcd.print("1.GOL");
@@ -902,7 +882,7 @@ void print_menu_nec(enum Necitit_Sub_Menus menu)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE CITITE----------------------------------------//
+//----------------------------AFISARE CITITE---------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1090,7 +1070,7 @@ void print_menu_cit(enum Citit_Sub_Menus menu)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE INUNDATII----------------------------------------//
+//----------------------------AFISARE INUNDATII------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1101,27 +1081,27 @@ void print_menu_in(enum Inundatii_Sub_Menus menu)
   switch (menu)
   {
     case INUNDATII_SUB_MENU_1:
-
       if(mesaje_ram[0].valid2 == true)
         {
            memset(row_up, 0, sizeof(row_up));
-          memset(row_down, 0, sizeof(row_down));
-          memcpy(row_up, &(mesaje_ram[0].inundatii)[0], 14);
-          memcpy(row_down, &(mesaje_ram[0].inundatii)[14], 16);
-          lcd.setCursor(0,0);
-          lcd.print("1.");
-          lcd.setCursor(2, 0);
-          lcd.print(row_up);
-          lcd.setCursor(0, 1);
-          lcd.print(row_down);
+           memset(row_down, 0, sizeof(row_down));
+           memcpy(row_up, &(mesaje_ram[0].inundatii)[0], 14);
+           memcpy(row_down, &(mesaje_ram[0].inundatii)[14], 16);
+           lcd.setCursor(0,0);
+           lcd.print("1.");
+           lcd.setCursor(2, 0);
+           lcd.print(row_up);
+           lcd.setCursor(0, 1);
+           lcd.print(row_down);
         }
          else  lcd.print("1.GOL");
       break;
     case INUNDATII_SUB_MENU_2:
       if(mesaje_ram[1].valid2 == true)
-        {  lcd.setCursor(0, 0);
-           lcd.print("2.");
-           lcd.print(mesaje_ram[1].inundatii);
+        {
+          lcd.setCursor(0, 0);
+          lcd.print("2.");
+          lcd.print(mesaje_ram[1].inundatii);
         }
          else  lcd.print("2.GOL");
       break;
@@ -1203,8 +1183,8 @@ void print_menu_in(enum Inundatii_Sub_Menus menu)
       lcd.setCursor(0, 0);
       if(Inundatii_citite() != 0)
       {
-      lcd.print(Inundatii_citite());
-      lcd.print(" INUNDATII");
+         lcd.print(Inundatii_citite());
+         lcd.print(" INUNDATII");
       }
       else lcd.print("- INUNDATII");
       break;
@@ -1214,7 +1194,7 @@ void print_menu_in(enum Inundatii_Sub_Menus menu)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE BLOCAT----------------------------------------//
+//----------------------------AFISARE BLOCAT---------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1226,43 +1206,42 @@ void print_menu_b(enum Menus_b menu)
     case MENU_BLOCAT:
       sec1++; 
       if(sec1>9)
-  {
-    sec1=0;
-    sec0++;
-    if(sec0>5)
-    {
-      sec0=0;
-      min1++;
-    }
-  }
-  if(min1>9)
-  {
-    min1=0;
-    min0++;
-    if(min0>5)
-    {
-      min0=0;
-      ora1++;
-    }
-  }
-  if(ora1==25)
-    ora1=0;
-  
-  if(ora1<10)
-  {  
-    lcd.print(ora0);
-  }  
-  lcd.print(ora1);
-  lcd.print(":");
-  lcd.print(min0);
-  lcd.print(min1);
+         {
+            sec1=0;
+            sec0++;
+            if(sec0>5)
+              {
+                 sec0=0;
+                 min1++;
+              }
+         }
+      if(min1>9)
+         {
+            min1=0;
+            min0++;
+            if(min0>5)
+               {
+                  min0=0;
+                  ora1++;
+               }
+         }
+      if(ora1==25)
+        ora1=0;
+      if(ora1<10)
+        {  
+          lcd.print(ora0);
+        }  
+      lcd.print(ora1);
+      lcd.print(":");
+      lcd.print(min0);
+      lcd.print(min1);
       lcd.print("   ");
       lcd.print(read_temp());
       lcd.print("C");
       lcd.setCursor(0, 1);
       lcd.print("Mesaje noi:");
       if(Mesaje_necitite() != 0)
-      lcd.print(Mesaje_necitite());
+         lcd.print(Mesaje_necitite());
       else lcd.print("-");
       break;
   }
@@ -1272,7 +1251,6 @@ void print_menu_b(enum Menus_b menu)
     switch(current_menu_b)
     {
       case MENU_DEBLOCAT:
-      //prelucrare parola
       lcd.clear(); 
       lcd.setCursor(0, 0);
       lcd.print("INTRODU PAROLA:");  
@@ -1287,7 +1265,7 @@ void print_menu_b(enum Menus_b menu)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE SUBMENIU----------------------------------------//
+//----------------------------AFISARE SUBMENIU-------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1364,7 +1342,7 @@ void print_menu_sub(enum Sub_Menus menu)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------AFISARE PRINCIPAL----------------------------------------//
+//----------------------------AFISARE PRINCIPAL------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1428,18 +1406,27 @@ void print_menu(enum Menus menu)
       case MENU_TEMPERATURA:
       lcd.clear(); 
       lcd.setCursor(0, 0);
-      lcd.print("TEMPERATURA");  
-      lcd.setCursor(0, 1);
-      lcd.print("T=");  
+      lcd.print("T:"); 
       lcd.print(read_temp()); 
-      lcd.print(" C");
+      lcd.print("C");
+      lcd.setCursor(0, 1);
+      lcd.print("SETEAZA:");  
+      if ((temperatura_setata < 80) && ((temperatura_setata > 24)))
+      { 
+        lcd.print(temperatura_setata);
+        lcd.print("C");
+      }
+      else
+      { 
+        lcd.setCursor(8, 1);
+        lcd.print("MAX!");
+      }
       break;
       case MENU_INUNDATII:
       lcd.setCursor(0, 0);
       lcd.print("AFISARE MESAJE");
       lcd.setCursor(0, 1);
       lcd.print(" ->INUNDATII");
-      
       break;
     }
   } 
@@ -1454,7 +1441,7 @@ void no_action(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------MENIU PRINCIPAL----------------------------------------//
+//----------------------------MENIU PRINCIPAL--------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1501,10 +1488,28 @@ void go_prev(void)
   scroll_menu = (Menus) ((int)scroll_menu % MENU_MAX_NUM);
 }
 
+void inc_temp(void)
+{
+  if (temperatura_setata < 80)
+  {
+    temperatura_setata++;
+  }
+}
+
+void dec_temp(void)
+{
+  if (temperatura_setata > 24)
+  temperatura_setata--;
+}
+
+void saved(void)
+{
+  go_home();
+}
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------SUB MENIU ----------------------------------------//
+//----------------------------SUB MENIU -------------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1570,7 +1575,7 @@ void confirm(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------MENIU NECITITE----------------------------------------//
+//----------------------------MENIU NECITITE---------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1598,7 +1603,7 @@ void go_prev_sub_nec(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------MENIU CITITE----------------------------------------//
+//----------------------------MENIU CITITE-----------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1626,7 +1631,7 @@ void go_prev_sub_cit(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------MENIU INUNDATII----------------------------------------//
+//----------------------------MENIU INUNDATII--------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1654,7 +1659,7 @@ void go_prev_sub_in(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------MENIU BLOCAT----------------------------------------//
+//----------------------------MENIU BLOCAT-----------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1701,7 +1706,7 @@ void sterge(void)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------Verificare parola----------------------------------------//
+//----------------------------Verificare parola------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1709,14 +1714,13 @@ void check_pass()
 {
   if (strcmp(parola, parola_introdusa) == 0) //daca parola buna
   {
-  blocat = false;
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("PAROLA CORECTA!");
-  lcd.setCursor(0,1);
-  lcd.print("    WELCOME");
-  delay(500);
-  
+    blocat = false;
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("PAROLA CORECTA!");
+    lcd.setCursor(0,1);
+    lcd.print("    WELCOME");
+    delay(500);
   }
   else //daca nu
   {
@@ -1745,7 +1749,7 @@ state_machine_handler_t* sm[MENU_MAX_NUM][EV_MAX_NUM] =
   {enter_menu, go_home, go_next, go_prev},                          // MENU_MAIN
   {enter_menu_sub, go_home, no_action, no_action},                  // MENU_MESAJE
   {go_home, go_home, no_action, no_action},                         // MENU_CONTROL
-  {go_home, go_home, no_action, no_action},                         // MENU_TEMPERATURA
+  {saved, go_home, inc_temp, dec_temp},                              // MENU_TEMPERATURA
   {enter_menu_subin, go_home, no_action, no_action},                // MENU_INUNDATII
 }; 
 
@@ -1842,7 +1846,7 @@ void state_machine(enum Menus menu, enum Buttons button)
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-//----------------------------BUTTONS----------------------------------------//
+//----------------------------BUTTONS----------------------------------------------//
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -1887,4 +1891,23 @@ Buttons GetButtons(void)
     ret_val = EV_PREV;
   }
   return ret_val;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+//----------------------------PID--------------------------------------------------//
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+
+void PID(void)
+{
+  float error =  temperatura_setata - temperatura;
+  if (error < 3 && error > -3)
+    suma_error += error;
+  suma_error = constrain(suma_error, -15, 15);
+  float diff = (error - prev_error);
+  float output = kp * error + ki * suma_error + kd * diff;
+  output = constrain(output, 0, 255);
+  prev_error = error;
+  analogWrite(BEC_pin, int(output));
 }
