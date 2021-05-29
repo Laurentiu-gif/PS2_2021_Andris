@@ -4,7 +4,7 @@
 #define MYUBRR FOSC/16/BAUD-1
 
 #define MSG_MAX_LEN 30
-#define FLOOD_COUNT_DETECTION_CYCLES 10
+#define FLOOD_COUNT_DETECTION_CYCLES 100
 #define BEC_pin 6
 
 #include <LiquidCrystal.h>
@@ -16,7 +16,7 @@ int volatile time_count = 0;
 const int rs = 12, en = 11, d4 = 4, d5 = 3, d6 = 8, d7 = 5;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);//Adresa, coloane, linii
 
-volatile float temperatura, prev_error, suma_error, temperatura_setata = 26;
+volatile float temperatura, prev_error, suma_error, temperatura_setata = 26.00;
 volatile float kp = 20, ki = 15, kd = 10;
 
 int temp_val[2];
@@ -1411,7 +1411,7 @@ void print_menu(enum Menus menu)
       lcd.print("C");
       lcd.setCursor(0, 1);
       lcd.print("SETEAZA:");  
-      if ((temperatura_setata < 80) && ((temperatura_setata > 24)))
+      if ((temperatura_setata < 80) && ((temperatura_setata > 15)))
       { 
         lcd.print(temperatura_setata);
         lcd.print("C");
@@ -1498,7 +1498,7 @@ void inc_temp(void)
 
 void dec_temp(void)
 {
-  if (temperatura_setata > 24)
+  if (temperatura_setata > 15)
   temperatura_setata--;
 }
 
@@ -1901,9 +1901,13 @@ Buttons GetButtons(void)
 
 void PID(void)
 {
-  float error =  temperatura_setata - temperatura;
-  if (error < 3 && error > -3)
-    suma_error += error;
+  float error = temperatura_setata - temperatura;
+  if (error < -3)
+  {
+    analogWrite(BEC_pin, int(0));
+    return 0;
+  }
+  suma_error += error;
   suma_error = constrain(suma_error, -15, 15);
   float diff = (error - prev_error);
   float output = kp * error + ki * suma_error + kd * diff;
